@@ -315,133 +315,151 @@ module.exports = require.node = function create_node(node_data = {}) {
             }
         }
 
-        node.ons.forEach(on => on('set', {key, patches, version, parents, origin, joiner_num}))
+        try {
 
-        // G: cool, someone is giving us a new version to add to our datastructure.
-        // it might seem like we would just go ahead and add it, but instead
-        // we only add it under certain conditions, namely one of the following
-        // must be true:
-        //
-        // !origin : in this case there is no origin, meaning the version was
-        // created locally, so we definitely want to add it.
-        //
-        // !resource.time_dag[version] : in this case the version must have come
-        // from someone else (or !origin would be true), but we don't have
-        // the version ourselves (otherwise it would be inside our time_dag),
-        // so we want to add this new version we haven't seen before.
-        //
-        // (joiner_num > resource.joiners[version]) : even if we already have
-        // this version, we might want to, in some sense, add it again,
-        // in the very special case where this version is a joiner,
-        // and its joiner_num is bigger than the version of this joiner that we
-        // already have.. the issue with joiners is that they can be created
-        // on multiple peers simultaneously, and they share the same version id,
-        // and in that case, it would be unclear who should send the "global"
-        // acknowledgment for the joiner, so we use this "joiner_num" to
-        // distinguish the otherwise identical looking joiners for the purposes
-        // of electing a particular joiner to handle the full acknowledgment.
+            node.ons.forEach(on => on('set', {key, patches, version, parents, origin, joiner_num}))
 
-        if (!origin                                         // Was created locally
-            || !resource.time_dag[version]                  // We don't have it yet
-            || (joiner_num > resource.joiners[version])) {  // It's a dominant joiner
+            // G: cool, someone is giving us a new version to add to our datastructure.
+            // it might seem like we would just go ahead and add it, but instead
+            // we only add it under certain conditions, namely one of the following
+            // must be true:
+            //
+            // !origin : in this case there is no origin, meaning the version was
+            // created locally, so we definitely want to add it.
+            //
+            // !resource.time_dag[version] : in this case the version must have come
+            // from someone else (or !origin would be true), but we don't have
+            // the version ourselves (otherwise it would be inside our time_dag),
+            // so we want to add this new version we haven't seen before.
+            //
+            // (joiner_num > resource.joiners[version]) : even if we already have
+            // this version, we might want to, in some sense, add it again,
+            // in the very special case where this version is a joiner,
+            // and its joiner_num is bigger than the version of this joiner that we
+            // already have.. the issue with joiners is that they can be created
+            // on multiple peers simultaneously, and they share the same version id,
+            // and in that case, it would be unclear who should send the "global"
+            // acknowledgment for the joiner, so we use this "joiner_num" to
+            // distinguish the otherwise identical looking joiners for the purposes
+            // of electing a particular joiner to handle the full acknowledgment.
 
-            // console.log('Branch •A• happened')
+            if (!origin                                         // Was created locally
+                || !resource.time_dag[version]                  // We don't have it yet
+                || (joiner_num > resource.joiners[version])) {  // It's a dominant joiner
 
-            // G: so we're going to go ahead and add this version to our
-            // datastructure, step 1 is to call "add_version" on the underlying
-            // mergeable..
+                // console.log('Branch •A• happened')
 
-            // console.log('Adding version', {version, parents, patches},
-            //             'to', Object.keys(resource.time_dag))
-            resource.mergeable.add_version(version, parents, patches)
+                // G: so we're going to go ahead and add this version to our
+                // datastructure, step 1 is to call "add_version" on the underlying
+                // mergeable..
 
-            // G: next, we want to remember some information for the purposes
-            // of acknowledgments, namely, we'll remember how many people
-            // we forward this version along to (we'll actually do the forwarding
-            // right after this), and we also remember whether or not
-            // we are the originators of this version (if we originated the version,
-            // then we'll be responsible for sending the "global" ack when
-            // the time is right)..
+                // console.log('Adding version', {version, parents, patches},
+                //             'to', Object.keys(resource.time_dag))
+                resource.mergeable.add_version(version, parents, patches)
+                
+                // G: next, we want to remember some information for the purposes
+                // of acknowledgments, namely, we'll remember how many people
+                // we forward this version along to (we'll actually do the forwarding
+                // right after this), and we also remember whether or not
+                // we are the originators of this version (if we originated the version,
+                // then we'll be responsible for sending the "global" ack when
+                // the time is right)..
 
-            resource.acks_in_process[version] = {
-                origin: origin,
-                count: node.welcomed_peers(key).length - (origin ? 1 : 0)
-            }
-
-            // log('node.set:', node.pid, 'Initializing ACKs for', version, 'to',
-            //     `${node.joined_peers(key).length}-${(origin ? 1 : 0)}=${resource.acks_in_process[version].count}`)
-
-            // log('node.set: we will want',
-            //             node.citizens(key).length - (origin ? 1 : 0),
-            //             'acks, because we have citizens', node.citizens(key))
-
-            assert(resource.acks_in_process[version].count >= 0,
-                   node.pid, 'Acks have below zero! Proof:',
-                   {origin, key, version,
-                    acks_in_process: resource.acks_in_process[version]})
-
-            // console.log('Initialized acks to', resource.acks_in_process[version])
-            
-            // G: well, I said forwarding the version would be next, but here
-            // is this line of code to remember the joiner_num of this
-            // version, in case it is a joiner (we store the joiner_num for
-            // each version in a auxiliary hashmap called joiners)..
-
-            if (joiner_num) resource.joiners[version] = joiner_num
-
-            // G: and now for the forwarding of the version to all our peers,
-            // (unless we received this "set" from one of our peers,
-            // in which case we don't want to send it back to them)
-
-            log('set: broadcasting to',
-                node.bindings(key)
-                   .filter(p => p.send && (!origin || p.id !== origin.id))
-                   .map   (p => p.id),
-                'pipes from', origin && origin.id)
-            // console.log('Now gonna send a set on', node.bindings(key))
-            node.bindings(key).forEach(pipe => {
-                if (pipe.send && (!origin || (pipe.id !== origin.id))) {
-                    log('set: sending now from', node.pid, pipe.type)
-                    pipe.send({method: 'set',
-                               key, patches, version, parents, joiner_num})
+                resource.acks_in_process[version] = {
+                    origin: origin,
+                    count: node.welcomed_peers(key).length - (origin ? 1 : 0)
                 }
-            })
-            
-        } else if (resource.acks_in_process[version]
-                   // Greg: In what situation is acks_in_process[version] false?
 
-                   // G: good question; the answer is that in some cases
-                   // we will delete acks_in_process for a version if,
-                   // say, we receive a global ack for a descendant of this version,
-                   // or if we receive a fissure.. in such cases, we simply
-                   // ignore the ack process for that version, and rely
-                   // on a descendant version getting globally acknowledged.
+                // log('node.set:', node.pid, 'Initializing ACKs for', version, 'to',
+                //     `${node.joined_peers(key).length}-${(origin ? 1 : 0)}=${resource.acks_in_process[version].count}`)
 
-                   && joiner_num == resource.joiners[version])
+                // log('node.set: we will want',
+                //             node.citizens(key).length - (origin ? 1 : 0),
+                //             'acks, because we have citizens', node.citizens(key))
 
-            // G: now if we're not going to add the version, most commonly because
-            // we already possess the version, there is another situation that
-            // can arise, namely, someone that we forwarded the version to
-            // sends it back to us... How could that happen? Well, they may have
-            // heard about this version from someone we sent it to, before
-            // hearing about it from us (assuming some pretty gross latency)..
-            // anyway, if it happens, we can treat it like an ACK for the version,
-            // which is why we decrement "count" for acks_in_process for this version;
-            // a similar line of code exists inside "node.ack"
+                assert(resource.acks_in_process[version].count >= 0,
+                       node.pid, 'Acks have below zero! Proof:',
+                       {origin, key, version,
+                        acks_in_process: resource.acks_in_process[version]})
 
-            // console.log('Branch •B• happened',
-            //             joiner_num,
-            //             resource.joiners[version],
-            //             resource.acks_in_process[version].count)
+                // console.log('Initialized acks to', resource.acks_in_process[version])
+                
+                // G: well, I said forwarding the version would be next, but here
+                // is this line of code to remember the joiner_num of this
+                // version, in case it is a joiner (we store the joiner_num for
+                // each version in a auxiliary hashmap called joiners)..
 
-            resource.acks_in_process[version].count--
+                if (joiner_num) resource.joiners[version] = joiner_num
 
-        // G: since we may have messed with the ack count, we check it
-        // to see if it has gone to 0, and if it has, take the appropriate action
-        // (which is probably to send a global ack)
+                // G: and now for the forwarding of the version to all our peers,
+                // (unless we received this "set" from one of our peers,
+                // in which case we don't want to send it back to them)
 
+                log('set: broadcasting to',
+                    node.bindings(key)
+                    .filter(p => p.send && (!origin || p.id !== origin.id))
+                    .map   (p => p.id),
+                    'pipes from', origin && origin.id)
+                // console.log('Now gonna send a set on', node.bindings(key))
+                node.bindings(key).forEach(pipe => {
+                    if (pipe.send && (!origin || (pipe.id !== origin.id))) {
+                        log('set: sending now from', node.pid, pipe.type)
+                        pipe.send({method: 'set',
+                                   key, patches, version, parents, joiner_num})
+                    }
+                })
+                
+            } else if (resource.acks_in_process[version]
+                       // Greg: In what situation is acks_in_process[version] false?
 
-        check_ack_count(key, resource, version)
+                       // G: good question; the answer is that in some cases
+                       // we will delete acks_in_process for a version if,
+                       // say, we receive a global ack for a descendant of this version,
+                       // or if we receive a fissure.. in such cases, we simply
+                       // ignore the ack process for that version, and rely
+                       // on a descendant version getting globally acknowledged.
+
+                       && joiner_num == resource.joiners[version])
+
+                // G: now if we're not going to add the version, most commonly because
+                // we already possess the version, there is another situation that
+                // can arise, namely, someone that we forwarded the version to
+                // sends it back to us... How could that happen? Well, they may have
+                // heard about this version from someone we sent it to, before
+                // hearing about it from us (assuming some pretty gross latency)..
+                // anyway, if it happens, we can treat it like an ACK for the version,
+                // which is why we decrement "count" for acks_in_process for this version;
+                // a similar line of code exists inside "node.ack"
+
+                // console.log('Branch •B• happened',
+                //             joiner_num,
+                //             resource.joiners[version],
+                //             resource.acks_in_process[version].count)
+
+                resource.acks_in_process[version].count--
+
+            // G: since we may have messed with the ack count, we check it
+            // to see if it has gone to 0, and if it has, take the appropriate action
+            // (which is probably to send a global ack)
+
+            check_ack_count(key, resource, version)
+
+        } catch (e) {
+            console.log('got an error!', e)
+            if (e.startsWith('Bad patch')) {
+                origin.send && origin.send({
+                    method: 'error',
+                    key,
+                    type: 'bad patch',
+                    in_response_to: {
+                        method: 'set',
+                        key, patches, version, parents, origin, joiner_num
+                    }
+                })
+                node.on_errors.forEach(f => f(key, origin))
+                
+            } else throw e
+        }
         return version
     }
     
@@ -451,6 +469,8 @@ module.exports = require.node = function create_node(node_data = {}) {
         assert(key && versions && fissures,
                'Missing some variables:',
                {key, versions, fissures})
+
+        try {
         // console.log('welcome:', key, 'versions:', versions.length,
         //             'unacking:', Object.keys(unack_boundary))
         var resource = node.resource_at(key)
@@ -785,6 +805,20 @@ module.exports = require.node = function create_node(node_data = {}) {
         // Now that we processed the welcome, set defaults if we have one
         if (default_val_for(key) && !node.current_version(key))
             node.set(key, default_val_for(key))
+        } catch (e) {
+            if (e.startsWith('Bad patch')) {
+                origin.send && origin.send({
+                    method: 'error',
+                    key,
+                    type: 'bad patch',
+                    in_response_to:
+                    {method: 'welcome',
+                     key, versions, fissures, unack_boundary, min_leaves, origin}
+                })
+                node.on_errors.forEach(f => f(key, origin))
+                
+            } else throw e
+        }
     }
     
     // Can be called as:

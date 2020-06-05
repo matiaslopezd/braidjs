@@ -815,6 +815,11 @@ function traverse_space_dag(S, f, cb, view_deleted, tail_cb) {
 }
 
 function parse_change(change) {
+    function safe_parse (s) {
+        try { return JSON.parse(s) }
+        catch (e) { throw 'Bad patch: ' + s }
+    }
+
     var ret = { keys : [] }
     var re = /^(delete)\s+|\.?([^\.\[ =]+)|\[((\-?\d+)(:\-?\d+)?|'(\\'|[^'])*'|"(\\"|[^"])*")\]|\s*=\s*([\s\S]*)/g
     var m
@@ -825,13 +830,13 @@ function parse_change(change) {
             ret.keys.push(m[2])
         else if (m[3] && m[5])
             ret.range = [
-                JSON.parse(m[4]),
-                JSON.parse(m[5].substr(1))
+                safe_parse(m[4]),
+                safe_parse(m[5].substr(1))
             ]
         else if (m[3])
-            ret.keys.push(JSON.parse(m[3]))
+            ret.keys.push(safe_parse(m[3]))
         else if (m[8]) {
-            ret.val = JSON.parse(m[8])
+            ret.val = safe_parse(m[8])
             rec(ret.val)
             function rec(x) {
                 if (x && typeof(x) == 'object') {
